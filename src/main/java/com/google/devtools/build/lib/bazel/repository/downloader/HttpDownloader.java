@@ -58,7 +58,10 @@ public class HttpDownloader {
 
   private static final int MAX_PARALLEL_DOWNLOADS = 8;
   private static final Semaphore semaphore = new Semaphore(MAX_PARALLEL_DOWNLOADS, true);
-
+  
+ /* add by kevin for work under proxy */
+  private static boolean DownloadFail = false;
+  
   protected final RepositoryCache repositoryCache;
   private List<Path> distdir = ImmutableList.of();
 
@@ -239,24 +242,46 @@ public class HttpDownloader {
     HttpStream.Factory httpStreamFactory = new HttpStream.Factory(progressInputStreamFactory);
     HttpConnectorMultiplexer multiplexer =
         new HttpConnectorMultiplexer(eventHandler, connector, httpStreamFactory, clock, sleeper);
-
-    // Connect to the best mirror and download the file, while reporting progress to the CLI.
-    semaphore.acquire();
+	   /* modified by kevin for work under proxy, if download fail once, only try wget */
     boolean success = false;
-    try (HttpStream payload = multiplexer.connect(urls, sha256);
-        OutputStream out = destination.getOutputStream()) {
-      ByteStreams.copy(payload, out);
-      success = true;
-    } catch (InterruptedIOException e) {
-      throw new InterruptedException();
-    } catch (IOException e) {
-      throw new IOException(
-          "Error downloading " + urls + " to " + destination + ": " + e.getMessage());
-    } finally {
-      semaphore.release();
-      eventHandler.post(new FetchEvent(urls.get(0).toString(), success));
-    }
+   	if (!DownloadFail) {
+      // Connect to the best mirror and download the file, while reporting progress to the CLI.
+      semaphore.acquire();
+      try (HttpStream payload = multiplexer.connect(urls, sha256);
+          OutputStream out = destination.getOutputStream()) {
+        ByteStreams.copy(payload, out);
+        success = true;
+      } catch (InterruptedIOException e) {
+        throw new InterruptedException();
+      } catch (IOException e) {
+        /* add by kevin for work under proxy */
+    	  DownloadFail = true;
+  	  System.out.println("WARN downloading " + urls + " to " + destination + ": " + e.getMessage());
+  	  /*
+        throw new IOException(
+            "Error downloading " + urls + " to " + destination + ": " + e.getMessage());
+        */
+      } finally {
+        semaphore.release();
+        eventHandler.post(new FetchEvent(urls.get(0).toString(), success));
+      }
+	}
 
+	/* add by kevin work under proxy, unsuccess, try wget */
+	if (!success) {
+	  semaphore.acquire();
+	  try {
+	  	SimpleWget.download(urls, destination, sha256);
+		success = true;
+	  }
+	  catch (IOException e) {
+	  	throw new IOException("Error downloading " + urls + " to " + destination + ": " + e.getMessage());
+	  }
+	  finally {
+        semaphore.release();
+        eventHandler.post(new FetchEvent(urls.get(0).toString(), success));
+      }
+	}
     if (isCachingByProvidedSha256) {
       repositoryCache.put(sha256, destination, KeyType.SHA256);
     } else if (repositoryCache.isEnabled()) {
